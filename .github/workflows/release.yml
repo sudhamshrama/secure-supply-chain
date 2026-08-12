@@ -119,13 +119,36 @@ jobs:
         if: github.event_name == 'push'
         run: cosign sign --yes "${IMAGE}@${{ steps.push.outputs.digest }}"
 
+      # SBOM attestation via GitHub's first-party action, NOT `cosign attest`.
+      #
+      # The first version used `cosign attest --type spdxjson`. It published
+      # successfully and CI's own verification passed — and the attestation was
+      # then unverifiable from anywhere else:
+      #
+      #   Error: none of the attestations matched the predicate type: spdxjson,
+      #          found: https://slsa.dev/provenance/v1
+      #
+      # Both attestations were present on the .att tag. The difference was
+      # FORMAT. Decoding them showed:
+      #
+      #   slsa provenance -> sigstore bundle v0.3, certificate embedded
+      #   spdx (cosign)   -> bare DSSE envelope, NO verificationMaterial
+      #
+      # With no certificate in the bundle, cosign cannot build a trust chain
+      # for that attestation, so it silently drops it and then reports that no
+      # attestation matched the predicate — an error message that points at the
+      # predicate type and hides the real cause.
+      #
+      # Mixing two attestation mechanisms on one image was the mistake. Both
+      # now go through actions/attest-*, producing the same bundle format.
       - name: Attach the SBOM as a signed attestation
         if: github.event_name == 'push'
-        run: |
-          cosign attest --yes \
-            --predicate sbom.spdx.json \
-            --type spdxjson \
-            "${IMAGE}@${{ steps.push.outputs.digest }}"
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
 
       # SLSA provenance: a signed statement of how the artifact was built —
       # which repo, which commit, which workflow, which runner. Answers
@@ -151,11 +174,23 @@ jobs:
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
           echo "::endgroup::"
-          echo "::group::verify SBOM attestation"
-          cosign verify-attestation "${IMAGE}@${{ steps.push.outputs.digest }}" \
-            --type spdxjson \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            > /dev/null
+          echo "::endgroup::"
+
+          # Verify BOTH attestations by predicate type, and assert each one
+          # individually. The previous version verified only the SBOM and
+          # passed while that attestation was in fact unverifiable — a
+          # verification step that can pass on a broken artifact is worse than
+          # no verification step, because it is believed.
+          echo "::group::verify attestations"
+          for predicate in \
+              "https://slsa.dev/provenance/v1" \
+              "https://spdx.dev/Document"; do
+            echo "--- $predicate"
+            gh attestation verify "oci://${IMAGE}@${{ steps.push.outputs.digest }}" \
+              --repo "${{ github.repository }}" \
+              --predicate-type "$predicate"
+          done
           echo "::endgroup::"
           echo "verified: ${IMAGE}@${{ steps.push.outputs.digest }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
