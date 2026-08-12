@@ -1,0 +1,6 @@
+apiVersion: v2
+name: checkout-api
+description: checkout-api — deployed only if its image is signed and attested
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

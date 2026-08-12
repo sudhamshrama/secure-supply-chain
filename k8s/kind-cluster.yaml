@@ -1,0 +1,6 @@
+# Single-node kind cluster. Everything in this project runs locally at $0.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: supplychain
+nodes:
+  - role: control-plane

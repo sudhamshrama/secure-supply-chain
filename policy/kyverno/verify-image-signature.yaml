@@ -1,0 +1,109 @@
+# Admission control: the cluster refuses to run an image it cannot verify.
+#
+# This is the part that makes signing mean something. Signing an image and then
+# letting the cluster run anything is theatre — the signature is only a control
+# if something CHECKS it at the moment a workload is admitted.
+#
+# Kyverno resolves the tag, fetches the signature from the registry, verifies
+# it against Fulcio/Rekor, and rejects the Pod if verification fails.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-checkout-api-signature
+  annotations:
+    policies.kyverno.io/title: Require a valid keyless signature
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Only images signed by this project's own GitHub Actions workflow may run.
+      Verification is by identity, not by key: a valid signature from the wrong
+      repository is still a rejection.
+spec:
+  validationFailureAction: Enforce   # Enforce, not Audit. Audit logs and admits.
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail               # If Kyverno is down, REFUSE. See note below.
+
+  rules:
+    - name: verify-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [apps]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/sudhamshrama/checkout-api*"
+
+          # Rewrite the accepted tag to the digest that was actually verified.
+          #
+          # Without this there is a TOCTOU hole: Kyverno verifies `:main`,
+          # admits the Pod, and the kubelet then pulls `:main` again — which
+          # can by then point at different content. Pinning to the verified
+          # digest closes the window.
+          mutateDigest: true
+          required: true
+
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    # No public key is distributed or rotated. Trust is anchored
+                    # in an IDENTITY: this repository's workflows, as certified
+                    # by GitHub's OIDC issuer and logged in Rekor.
+                    subject: "https://github.com/sudhamshrama/secure-supply-chain/*"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+---
+# Require the SBOM attestation as well as a signature.
+#
+# A signature proves WHO built the image. An attestation carries WHAT is in it.
+# Requiring both means an unsigned-but-attested image and a signed-but-opaque
+# image are equally rejected.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-sbom-attestation
+  annotations:
+    policies.kyverno.io/title: Require a signed SBOM attestation
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+
+  rules:
+    - name: require-sbom
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [apps]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/sudhamshrama/checkout-api*"
+          required: true
+          attestations:
+            - type: spdxjson
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com/sudhamshrama/secure-supply-chain/*"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: https://rekor.sigstore.dev
+# NOTE ON failurePolicy: Fail
+#
+# This is a real availability trade-off, chosen deliberately.
+#
+# `Fail` means that if the Kyverno webhook is unreachable, admission is
+# REFUSED — including for workloads that would have passed. A broken policy
+# engine becomes a cluster-wide outage for new pods.
+#
+# `Ignore` means a webhook outage silently disables the control, and unsigned
+# images sail straight in. That is the worse failure for a security control:
+# it fails open, quietly, exactly when something is already wrong.
+#
+# The mitigation is to scope the policy narrowly (namespace `apps` only) so a
+# webhook failure cannot block kube-system or the policy engine's own recovery.

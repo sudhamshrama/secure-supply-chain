@@ -1,0 +1,21 @@
+{
+  "_comment": "Time-boxed exceptions to the vulnerability gate. Every entry needs a reason, a named owner, and an expiry date. On the expiry date the build FAILS until somebody re-reviews it. A permanent exception is indistinguishable from having no gate.",
+
+  "_how_to_add": "Only add an entry when the finding is genuinely not actionable. If a fix exists and can be applied, apply it — that is what happened to the two starlette advisories and to the pip-vendored msgpack finding, neither of which is listed here.",
+
+  "allow": [
+    {
+      "id": "CVE-2026-15308",
+      "package": "python",
+      "severity": "High",
+      "owner": "sudhamsh",
+      "expires": "2026-11-12",
+      "reason": "grype reports fix=3.15.0, which is NOT a stable CPython release — Docker Hub publishes only 3.15.0a5..a8 alphas. Verified empirically that python:3.14-slim (3.14.7) carries the identical finding, so upgrading the base image does not help. The only two ways to clear it are shipping an alpha interpreter to production or accepting the risk. Revisit when 3.15.0 ships stable, or sooner if an exploit appears. Tracked: the app does not use the affected code path."
+    }
+  ],
+
+  "_rejected_examples": [
+    "starlette GHSA-82w8-qh3p-5jfq / GHSA-wqp7-x3pw-xc5r — FIXED by pinning starlette==1.6.0 explicitly, rather than allowlisted. It is a transitive dep of fastapi, which has no upper bound on it.",
+    "msgpack GHSA-6v7p-g79w-8964 — FIXED by deleting pip from the runtime image. The package was vendored inside pip and was never a declared dependency, so no pin could have addressed it."
+  ]
+}

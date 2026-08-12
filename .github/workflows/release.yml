@@ -1,0 +1,161 @@
+name: Build, scan, sign, attest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/checkout-api
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push to GHCR
+      id-token: write        # KEYLESS signing — see the sign step
+      attestations: write    # SLSA provenance
+
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      # ---- Build once, locally, and scan BEFORE anything is published ------
+      #
+      # Ordering matters. Publish-then-scan means a vulnerable image exists in
+      # the registry where something can pull it, even if the build later goes
+      # red. Nothing leaves this job until the gate has passed.
+      - name: Build for scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: scan-target:${{ github.sha }}
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
+            GIT_SHA=${{ github.sha }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: scan-target:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Scan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/grype" scan-target:${{ github.sha }} -o json > scan.json
+
+      # ---- The gate ---------------------------------------------------------
+      #
+      # Not `grype --fail-on high`. That blocks on findings nobody can act on
+      # (this image has ~176, of which 1 is fixable) and gets switched off.
+      # This blocks on FIXABLE findings, with time-boxed exceptions that expire.
+      - name: Vulnerability gate
+        run: python3 scripts/vuln_gate.py scan.json policy/vuln-allowlist.json
+
+      - name: Upload SBOM and scan as build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-evidence-${{ github.sha }}
+          path: |
+            sbom.spdx.json
+            scan.json
+
+      # ---- Publish, then sign ----------------------------------------------
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        id: push
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:main
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
+            GIT_SHA=${{ github.sha }}
+
+      - uses: sigstore/cosign-installer@v3
+        if: github.event_name == 'push'
+
+      # KEYLESS signing.
+      #
+      # There is no private key anywhere — not in secrets, not on a runner, not
+      # in a vault. cosign exchanges the workflow's OIDC token for a
+      # short-lived certificate from Fulcio, signs, and records the signature
+      # in the Rekor public transparency log.
+      #
+      # What gets proven is not "someone with the key signed this" but "THIS
+      # WORKFLOW, in THIS REPOSITORY, at THIS COMMIT produced this digest" —
+      # a stronger claim, and one that cannot be replayed by whoever steals a
+      # key, because there is no key to steal.
+      #
+      # Signing is by DIGEST, never by tag. A tag can be repointed after
+      # signing; a digest is the content.
+      - name: Sign the image (keyless)
+        if: github.event_name == 'push'
+        run: cosign sign --yes "${IMAGE}@${{ steps.push.outputs.digest }}"
+
+      - name: Attach the SBOM as a signed attestation
+        if: github.event_name == 'push'
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "${IMAGE}@${{ steps.push.outputs.digest }}"
+
+      # SLSA provenance: a signed statement of how the artifact was built —
+      # which repo, which commit, which workflow, which runner. Answers
+      # "where did this image come from?" without trusting whoever pushed it.
+      - name: Generate SLSA provenance attestation
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # ---- Verify what we just published -----------------------------------
+      #
+      # Signing and then not verifying is how broken signing goes unnoticed for
+      # months. This asserts the identity too: a signature from the WRONG
+      # workflow is not a valid signature.
+      - name: Verify signature and attestation
+        if: github.event_name == 'push'
+        run: |
+          echo "::group::verify signature"
+          cosign verify "${IMAGE}@${{ steps.push.outputs.digest }}" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          echo "::endgroup::"
+          echo "::group::verify SBOM attestation"
+          cosign verify-attestation "${IMAGE}@${{ steps.push.outputs.digest }}" \
+            --type spdxjson \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /dev/null
+          echo "::endgroup::"
+          echo "verified: ${IMAGE}@${{ steps.push.outputs.digest }}"

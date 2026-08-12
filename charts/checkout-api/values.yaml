@@ -1,0 +1,41 @@
+# Image reference.
+#
+# `digest` wins over `tag` when set, and CI always sets it.
+#
+# A tag is a mutable pointer: `:main` can be repointed at different content
+# after admission control has already approved it, which is precisely the
+# substitution attack signing is meant to prevent. Verifying a signature on a
+# tag and then pulling that tag again is a TOCTOU gap. A digest closes it.
+image:
+  repository: ghcr.io/sudhamshrama/checkout-api
+  tag: main
+  digest: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    # No CPU limit on purpose: CFS throttling under a CPU limit causes latency
+    # spikes that look like application bugs. Memory IS limited, because memory
+    # is not compressible — a leak without a limit takes the node down.
+    memory: 192Mi
+
+# Matches the Dockerfile's USER 10001. runAsNonRoot checks the numeric UID, so
+# a mismatch here fails the pod at admission rather than at runtime.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+service:
+  port: 8000
