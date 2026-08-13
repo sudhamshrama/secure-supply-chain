@@ -9,7 +9,7 @@
 image:
   repository: ghcr.io/sudhamshrama/checkout-api
   tag: main
-  digest: ""
+  digest: "sha256:50eae41900b8eebe1520de13fa24e10ab60e044ef4bfaaa1f57c93cdebd97a81"
   pullPolicy: IfNotPresent
 
 replicaCount: 1
