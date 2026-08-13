@@ -26,6 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       # ---- Build once, locally, and scan BEFORE anything is published ------
@@ -33,12 +34,20 @@ jobs:
       # Ordering matters. Publish-then-scan means a vulnerable image exists in
       # the registry where something can pull it, even if the build later goes
       # red. Nothing leaves this job until the gate has passed.
+      # Single-arch here on purpose: `load: true` can only import one platform
+      # into the local docker daemon. The published image is multi-arch.
+      #
+      # Honest limitation: this scans linux/amd64 and ships amd64 + arm64. The
+      # package sets are near-identical since both come from the same Debian
+      # base and the same pip resolution, but "near-identical" is not "identical"
+      # and a scan of one architecture is not evidence about the other.
       - name: Build for scanning
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
           push: false
+          platforms: linux/amd64
           tags: scan-target:${{ github.sha }}
           build-args: |
             APP_VERSION=${{ github.ref_name }}
@@ -98,6 +107,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # MULTI-ARCH. GitHub's runners are amd64; the kind cluster used to verify
+      # admission runs on an arm64 Mac. A single-arch push produced an image
+      # that passed every signature and attestation check and then failed to
+      # start:
+      #
+      #   Failed to pull image ...: no match for platform in manifest: not found
+      #
+      # Note what that means: admission control APPROVED an image the node could
+      # not run. Signature verification and runnability are independent
+      # properties, and a green admission decision says nothing about the second.
+      #
+      # The digest below is the manifest LIST digest, which is what gets signed —
+      # so the signature covers both architectures, not one of them.
       - name: Push
         id: push
         if: github.event_name == 'push'
@@ -105,6 +127,7 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE }}:${{ github.sha }}
             ${{ env.IMAGE }}:main

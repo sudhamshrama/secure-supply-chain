@@ -97,7 +97,7 @@ spec:
             # carries the same 102 packages in 962 KB and fits.
             #
             # The type string must match what `cosign attest --type` produced.
-            - type: cyclonedx
+            - type: https://cyclonedx.org/bom
               attestors:
                 - count: 1
                   entries:
