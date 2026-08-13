@@ -44,12 +44,26 @@ jobs:
             APP_VERSION=${{ github.ref_name }}
             GIT_SHA=${{ github.sha }}
 
+      # CycloneDX, not SPDX — a SIZE decision forced by the enforcement point.
+      #
+      # The SPDX SBOM for this image is 2251 KB. Kyverno refuses to verify an
+      # attestation payload over 2 MB:
+      #
+      #   context size limit exceeded: 2307687 bytes exceeds limit of 2097152
+      #
+      # 2750 of those entries are individual FILES, not packages — package data
+      # alone is 188 KB. Disabling syft's file-metadata cataloger only got it to
+      # 1861 KB, because SPDX still emits package-owned file lists.
+      #
+      # CycloneDX carries the same 102 packages in 962 KB. For admission control
+      # the question is "what dependencies are in this image", not "what is every
+      # file path", so the file inventory buys nothing at the gate.
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
           image: scan-target:${{ github.sha }}
-          format: spdx-json
-          output-file: sbom.spdx.json
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
           upload-artifact: false
 
       - name: Scan
@@ -72,7 +86,7 @@ jobs:
         with:
           name: supply-chain-evidence-${{ github.sha }}
           path: |
-            sbom.spdx.json
+            sbom.cdx.json
             scan.json
 
       # ---- Publish, then sign ----------------------------------------------
@@ -119,36 +133,28 @@ jobs:
         if: github.event_name == 'push'
         run: cosign sign --yes "${IMAGE}@${{ steps.push.outputs.digest }}"
 
-      # SBOM attestation via GitHub's first-party action, NOT `cosign attest`.
+      # SBOM attestation via `cosign attest`, NOT actions/attest-sbom.
       #
-      # The first version used `cosign attest --type spdxjson`. It published
-      # successfully and CI's own verification passed — and the attestation was
-      # then unverifiable from anywhere else:
+      # This was changed to actions/attest-sbom and then changed back, because
+      # the two write to DIFFERENT PLACES:
       #
-      #   Error: none of the attestations matched the predicate type: spdxjson,
-      #          found: https://slsa.dev/provenance/v1
+      #   cosign attest        -> the `.att` TAG   (<digest>.att)
+      #   actions/attest-sbom  -> the OCI REFERRERS API
       #
-      # Both attestations were present on the .att tag. The difference was
-      # FORMAT. Decoding them showed:
+      # Both are valid. `cosign verify-attestation` and `gh attestation verify`
+      # read either. But KYVERNO reads the `.att` tag, so the referrers-only
+      # version produced an image that verified perfectly from a laptop and was
+      # rejected at admission with "no matching attestations".
       #
-      #   slsa provenance -> sigstore bundle v0.3, certificate embedded
-      #   spdx (cosign)   -> bare DSSE envelope, NO verificationMaterial
-      #
-      # With no certificate in the bundle, cosign cannot build a trust chain
-      # for that attestation, so it silently drops it and then reports that no
-      # attestation matched the predicate — an error message that points at the
-      # predicate type and hides the real cause.
-      #
-      # Mixing two attestation mechanisms on one image was the mistake. Both
-      # now go through actions/attest-*, producing the same bundle format.
+      # The lesson: match the producing tool to the ENFORCEMENT POINT, not to
+      # whichever verification command you happen to run by hand.
       - name: Attach the SBOM as a signed attestation
         if: github.event_name == 'push'
-        uses: actions/attest-sbom@v2
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          sbom-path: sbom.spdx.json
-          push-to-registry: true
+        run: |
+          cosign attest --yes \
+            --predicate sbom.cdx.json \
+            --type cyclonedx \
+            "${IMAGE}@${{ steps.push.outputs.digest }}"
 
       # SLSA provenance: a signed statement of how the artifact was built —
       # which repo, which commit, which workflow, which runner. Answers
@@ -174,22 +180,22 @@ jobs:
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
           echo "::endgroup::"
-          echo "::endgroup::"
 
-          # Verify BOTH attestations by predicate type, and assert each one
-          # individually. The previous version verified only the SBOM and
-          # passed while that attestation was in fact unverifiable — a
-          # verification step that can pass on a broken artifact is worse than
-          # no verification step, because it is believed.
-          echo "::group::verify attestations"
-          for predicate in \
-              "https://slsa.dev/provenance/v1" \
-              "https://spdx.dev/Document"; do
-            echo "--- $predicate"
-            gh attestation verify "oci://${IMAGE}@${{ steps.push.outputs.digest }}" \
-              --repo "${{ github.repository }}" \
-              --predicate-type "$predicate"
-          done
+          # Verify with COSIGN — the same library Kyverno uses at admission.
+          #
+          # `gh attestation verify` was used here at one point. It reads the
+          # referrers API and prefix-matches predicate types, so it passed on
+          # artifacts that Kyverno then rejected. A verification step that is
+          # more permissive than the enforcement point is worse than none: it
+          # produces a green pipeline and a cluster that refuses every deploy.
+          #
+          # Verify with the tool that enforces, against the exact predicate type.
+          echo "::group::verify SBOM attestation"
+          cosign verify-attestation "${IMAGE}@${{ steps.push.outputs.digest }}" \
+            --type cyclonedx \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /dev/null
           echo "::endgroup::"
           echo "verified: ${IMAGE}@${{ steps.push.outputs.digest }}"
         env:

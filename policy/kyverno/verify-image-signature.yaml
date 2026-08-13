@@ -84,7 +84,20 @@ spec:
             - "ghcr.io/sudhamshrama/checkout-api*"
           required: true
           attestations:
-            - type: spdxjson
+            # CycloneDX, and the reason is SIZE, not preference.
+            #
+            # Kyverno pulls the attestation payload into its policy context to
+            # verify it, and refuses anything over 2 MB:
+            #
+            #   context size limit exceeded: 2307687 bytes exceeds limit of
+            #   2097152 bytes
+            #
+            # The SPDX SBOM for this image is 2251 KB, of which 2750 entries
+            # are individual FILES — package data alone is 188 KB. CycloneDX
+            # carries the same 102 packages in 962 KB and fits.
+            #
+            # The type string must match what `cosign attest --type` produced.
+            - type: cyclonedx
               attestors:
                 - count: 1
                   entries:
