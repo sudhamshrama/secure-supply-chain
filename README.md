@@ -15,6 +15,8 @@ unsigned image, same repo    →  REJECTED: "no signatures found"
 The application (`checkout-api`, a three-endpoint FastAPI service) is
 deliberately trivial. Everything interesting is the pipeline around it.
 
+![Build, scan, sign and attest pipeline runs](docs/screenshots/ci-pipeline-green.png)
+
 ---
 
 ## What this demonstrates
