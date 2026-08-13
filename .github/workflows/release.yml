@@ -89,6 +89,30 @@ jobs:
       - name: Vulnerability gate
         run: python3 scripts/vuln_gate.py scan.json policy/vuln-allowlist.json
 
+      # Manifest policy, checked on the RENDERED chart.
+      #
+      # Signing proves provenance. It says nothing about whether the workload is
+      # configured safely — a correctly signed image running as root with a
+      # writable filesystem is a correctly signed root shell.
+      #
+      # Kyverno enforces some of the same rules at admission. Duplicating them
+      # here is deliberate: a CI failure is a few seconds of feedback on a pull
+      # request, an admission rejection is discovered at deploy time.
+      - name: Policy tests and manifest checks
+        run: |
+          curl -sSfL "https://github.com/open-policy-agent/conftest/releases/download/v0.62.0/conftest_0.62.0_Linux_x86_64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" conftest
+          export PATH="$RUNNER_TEMP:$PATH"
+
+          # The policies are unit-tested first. A rule with a typo in its field
+          # path matches nothing and silently passes everything.
+          conftest verify --policy policy/conftest
+
+          helm template checkout-api charts/checkout-api \
+            --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+            > /tmp/rendered.yaml
+          conftest test --policy policy/conftest /tmp/rendered.yaml
+
       - name: Upload SBOM and scan as build artifacts
         if: always()
         uses: actions/upload-artifact@v4
