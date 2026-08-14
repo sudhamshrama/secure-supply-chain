@@ -7,9 +7,37 @@ Build → SBOM → vulnerability gate → keyless signature → SBOM attestation
 SLSA provenance → admission control. No private key exists anywhere in the
 system.
 
+Verbatim, on a live cluster — both images from the same registry, both matching
+the same policy:
+
+**Unsigned:**
+
+```console
+$ kubectl run unsigned-probe -n apps --image=ghcr.io/sudhamshrama/checkout-api@sha256:8d49c50a...
+Error from server: admission webhook "mutate.kyverno.svc-fail" denied the request:
+
+resource Pod/apps/unsigned-probe was blocked due to the following policies
+
+require-sbom-attestation:
+  require-sbom: 'image attestations verification failed, verifiedCount: 0,
+    requiredCount: 1, error: no matching attestations: '
+verify-checkout-api-signature:
+  verify-signature: 'failed to verify image ghcr.io/sudhamshrama/checkout-api@sha256:8d49c50a...:
+    .attestors[0].entries[0].keyless: no signatures found'
 ```
-signed + attested image      →  ADMITTED, pod Running, serving traffic
-unsigned image, same repo    →  REJECTED: "no signatures found"
+
+**Signed and attested:**
+
+```console
+$ kubectl apply -n apps -f <(helm template signed charts/checkout-api --set image.digest=sha256:50eae419...)
+deployment.apps/signed created
+
+$ kubectl -n apps rollout status deploy/signed
+deployment "signed" successfully rolled out
+
+$ kubectl -n apps get pods -l app.kubernetes.io/name=checkout-api
+NAME                      READY   STATUS    RESTARTS   AGE
+signed-6c55cc748d-99r4n   1/1     Running   0          11s
 ```
 
 The application (`checkout-api`, a three-endpoint FastAPI service) is

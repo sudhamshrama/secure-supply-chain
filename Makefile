@@ -21,6 +21,23 @@ cluster:  ## Create the kind cluster and install Kyverno
 	kind get clusters | grep -q supplychain || kind create cluster --config k8s/kind-cluster.yaml
 	helm repo add kyverno https://kyverno.github.io/kyverno/ 2>/dev/null || true
 	helm repo update >/dev/null
+	@# Recover a release left mid-operation before trying to upgrade.
+	@#
+	@# `helm upgrade --install --wait` that is interrupted - Ctrl-C, a timeout,
+	@# a laptop closing - leaves the release in pending-install or
+	@# pending-upgrade. Helm then refuses every subsequent operation with
+	@# "another operation (install/upgrade/rollback) is in progress", and it
+	@# never clears on its own. That turns this target into a one-shot command,
+	@# which is the worst possible property for the instruction the README tells
+	@# people to run first.
+	@status=$$(helm status kyverno -n kyverno -o json 2>/dev/null \
+	    | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])' 2>/dev/null || echo none); \
+	if echo "$$status" | grep -q pending; then \
+	  echo "kyverno release is $$status - recovering"; \
+	  helm rollback kyverno -n kyverno 2>/dev/null \
+	    || helm uninstall kyverno -n kyverno --wait 2>/dev/null \
+	    || true; \
+	fi
 	helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace --wait --timeout 8m
 	kubectl create namespace apps --dry-run=client -o yaml | kubectl apply -f -
 
